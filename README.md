@@ -60,4 +60,6 @@ The workflow builds the APK on every push to main (or manual run) and uploads it
 - .github/workflows/: CI pipeline
 
 ## License
-Proprietary (internal/beta)
+This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for the full license text.
+
+All previous versions and all future versions of this software are covered by this same license unless explicitly stated otherwise in writing by the copyright holder.
