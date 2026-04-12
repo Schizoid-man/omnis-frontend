@@ -294,6 +294,16 @@ export async function sendMessage(
   };
 }
 
+export async function deleteMessage(
+  chatId: number,
+  messageId: number,
+): Promise<{ status: string; message_id: number }> {
+  const endpoint = ENDPOINTS.CHAT_DELETE_MESSAGE
+    .replace("{chat_id}", chatId.toString())
+    .replace("{message_id}", messageId.toString());
+  return request<{ status: string; message_id: number }>(endpoint, { method: "DELETE" });
+}
+
 // ============ User Search API ============
 export async function searchUsers(
   query: string,

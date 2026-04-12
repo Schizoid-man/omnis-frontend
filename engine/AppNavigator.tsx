@@ -8,6 +8,7 @@ import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
 import { StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { AppProvider, ChatProvider, useApp } from "./context";
 import {
@@ -72,11 +73,13 @@ export function AppNavigator() {
 
   return (
     <GestureHandlerRootView style={styles.gestureRoot}>
-      <SafeAreaProvider>
-        <AppProvider>
-          <MainNavigator />
-        </AppProvider>
-      </SafeAreaProvider>
+      <KeyboardProvider>
+        <SafeAreaProvider>
+          <AppProvider>
+            <MainNavigator />
+          </AppProvider>
+        </SafeAreaProvider>
+      </KeyboardProvider>
     </GestureHandlerRootView>
   );
 }

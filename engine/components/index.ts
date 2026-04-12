@@ -7,8 +7,6 @@ export { Button } from "./Button";
 export { ChatListItem } from "./ChatListItem";
 export { Header } from "./Header";
 export { Input } from "./Input";
-export { MessageBubble } from "./MessageBubble";
-export { MessageInput } from "./MessageInput";
 export { ReplyPreview } from "./ReplyPreview";
 export { SearchBar } from "./SearchBar";
 export { SessionItem } from "./SessionItem";

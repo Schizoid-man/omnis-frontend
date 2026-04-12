@@ -3,18 +3,17 @@ import { useNavigation, useRoute } from "@react-navigation/native";
 import type { NativeStackNavigationProp, NativeStackScreenProps } from "@react-navigation/native-stack";
 import * as DocumentPicker from "expo-document-picker";
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import * as Clipboard from "expo-clipboard";
 import {
   Alert,
-  Keyboard,
-  KeyboardAvoidingView,
-  Platform,
+  BackHandler,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import {
-  Actions,
   Bubble,
   Composer,
   GiftedChat,
@@ -76,7 +75,7 @@ function SwipeReplyableBubble({
   const gesture = Gesture.Pan()
     .runOnJS(true)
     .activeOffsetX([8, 10_000])
-    .failOffsetY([-12, 12])
+    .failOffsetY([-20, 20])
     .onUpdate((event) => {
       const next = Math.max(0, Math.min(event.translationX, 88));
       translateX.value = next;
@@ -115,6 +114,7 @@ export function ChatScreen() {
     openChat,
     closeChat,
     sendMessage,
+    deleteMessage,
     loadMessages,
     getEpochKeyForChat,
   } = useChat();
@@ -126,31 +126,20 @@ export function ChatScreen() {
   const [thumbnailPaths, setThumbnailPaths] = useState<Map<string, string>>(new Map());
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [replyTarget, setReplyTarget] = useState<{ id: number; text: string; sender: string } | null>(null);
-  const [toolbarLift, setToolbarLift] = useState(0);
+  const [selectedMessage, setSelectedMessage] = useState<OmnisGiftedMessage | null>(null);
   const autoDownloadInFlightRef = useRef(new Set<string>());
-  const toolbarHostRef = useRef<View | null>(null);
-  const keyboardTopRef = useRef<number | null>(null);
+  const messageContainerRef = useRef<any>(null);
 
-  // On Android, adjustResize handles keyboard avoidance at the OS level.
-  // The toolbarLift mechanism is iOS-only to manually push the toolbar above
-  // the keyboard before layout updates (keyboardWillShow fires pre-layout).
-  const recalcToolbarLift = useCallback((keyboardTop: number | null) => {
-    if (Platform.OS === "android") {
-      setToolbarLift(0);
-      return;
-    }
-
-    if (keyboardTop == null || !toolbarHostRef.current) {
-      setToolbarLift(0);
-      return;
-    }
-
-    toolbarHostRef.current.measureInWindow((_x, y, _w, height) => {
-      const overlap = y + height - keyboardTop + 6;
-      const next = Math.max(0, Math.round(overlap));
-      setToolbarLift((prev) => (Math.abs(prev - next) > 1 ? next : prev));
+  // Dismiss selection on hardware back
+  useEffect(() => {
+    if (!selectedMessage) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      setSelectedMessage(null);
+      return true;
     });
-  }, []);
+    return () => sub.remove();
+  }, [selectedMessage]);
+
 
   useEffect(() => {
     const unsub = mediaManager.subscribe((progress: MediaTransferProgress) => {
@@ -206,40 +195,6 @@ export function ChatScreen() {
     };
   }, [chatId, closeChat, openChat]);
 
-  useEffect(() => {
-    // Android resizes the window automatically via adjustResize — no manual
-    // keyboard tracking needed. This listener block is iOS-only.
-    if (Platform.OS === "android") return;
-
-    const showSub = Keyboard.addListener("keyboardWillShow", (event) => {
-      const nextTop = event.endCoordinates?.screenY;
-      if (typeof nextTop === "number") {
-        keyboardTopRef.current = nextTop;
-        requestAnimationFrame(() => {
-          recalcToolbarLift(nextTop);
-        });
-      }
-    });
-
-    const hideSub = Keyboard.addListener("keyboardWillHide", () => {
-      keyboardTopRef.current = null;
-      setToolbarLift(0);
-    });
-
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, [recalcToolbarLift]);
-
-  useEffect(() => {
-    if (Platform.OS === "android") return;
-    if (keyboardTopRef.current == null) return;
-    const id = requestAnimationFrame(() => {
-      recalcToolbarLift(keyboardTopRef.current);
-    });
-    return () => cancelAnimationFrame(id);
-  }, [composerText, pendingAttachments.length, replyTarget, recalcToolbarLift]);
 
   const attachmentEpochMap = useMemo(() => {
     const map = new Map<string, { epochId: number; legacyFileKey?: string; legacyNonce?: string }>();
@@ -365,6 +320,62 @@ export function ChatScreen() {
     }
     return map;
   }, [auth.userId, auth.username, messages, withUser]);
+
+  const scrollToMessage = useCallback((replyId: number) => {
+    const index = giftedMessages.findIndex((m) => m.omnisLocalMessage?.id === replyId);
+    if (index === -1 || !messageContainerRef.current?.flatListRef) return;
+    try {
+      messageContainerRef.current.flatListRef.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
+    } catch {
+      // Message not yet rendered in the list; silently ignore
+    }
+  }, [giftedMessages]);
+
+  const handleReplySelected = useCallback(() => {
+    const local = selectedMessage?.omnisLocalMessage;
+    if (!local) return;
+    const sender = local.sender_id === auth.userId ? (auth.username ?? "Me") : withUser;
+    setReplyTarget({
+      id: local.id,
+      text: getReplyPreviewText(local.plaintext, local.attachments?.length ?? 0),
+      sender,
+    });
+    setSelectedMessage(null);
+  }, [selectedMessage, auth.userId, auth.username, withUser]);
+
+  const handleCopySelected = useCallback(async () => {
+    const raw = selectedMessage?.omnisLocalMessage?.plaintext;
+    const display = raw ? mediaManager.getDisplayText(raw).trim() : null;
+    if (display) {
+      await Clipboard.setStringAsync(display);
+      setToastMessage("Copied");
+    }
+    setSelectedMessage(null);
+  }, [selectedMessage]);
+
+  const handleDeleteSelected = useCallback(() => {
+    const local = selectedMessage?.omnisLocalMessage;
+    if (!local) return;
+    Alert.alert(
+      "Delete message",
+      "This message will be deleted for everyone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            setSelectedMessage(null);
+            try {
+              await deleteMessage(chatId, local.id);
+            } catch {
+              setToastMessage("Failed to delete message");
+            }
+          },
+        },
+      ],
+    );
+  }, [selectedMessage, chatId, deleteMessage]);
 
   const handleSaveAttachment = useCallback(
     async (uploadId: string, fileName: string, mimeType: string) => {
@@ -531,15 +542,28 @@ export function ChatScreen() {
 
       const localMessage = currentMessage.omnisLocalMessage;
       const optimistic = currentMessage.omnisOptimisticMessage;
+      const isSelected = selectedMessage?._id === currentMessage._id;
+      const isSelf = currentMessage.user._id === (auth.userId ?? 0);
+
+      // Deleted message placeholder
+      if (localMessage?.is_deleted) {
+        return (
+          <View style={[styles.deletedBubble, isSelf ? styles.deletedBubbleRight : styles.deletedBubbleLeft]}>
+            <Ionicons name="ban-outline" size={14} color={Colors.textMuted} />
+            <Text style={styles.deletedText}>This message was deleted</Text>
+          </View>
+        );
+      }
 
       return (
-        <View>
+        <View style={isSelected ? styles.bubbleSelected : undefined}>
           {localMessage?.reply_id != null && replyLookup.has(localMessage.reply_id) ? (
             <View style={styles.replyBubblePreviewWrap}>
               <ReplyPreview
                 replyText={replyLookup.get(localMessage.reply_id)?.text ?? "Message"}
                 replySender={replyLookup.get(localMessage.reply_id)?.sender}
                 isSent={currentMessage.user._id === (auth.userId ?? 0)}
+                onPress={() => scrollToMessage(localMessage.reply_id!)}
               />
             </View>
           ) : null}
@@ -596,15 +620,16 @@ export function ChatScreen() {
         </View>
       );
     },
-    [auth.userId, auth.username, decryptedPaths, handleDownloadAttachment, handleSaveAttachment, replyLookup, retryOptimisticMessage, thumbnailPaths, withUser],
+    [auth.userId, auth.username, decryptedPaths, handleDownloadAttachment, handleSaveAttachment, replyLookup, retryOptimisticMessage, scrollToMessage, selectedMessage, thumbnailPaths, withUser],
   );
 
   const renderInputToolbar = useCallback(
     (props: InputToolbarProps<OmnisGiftedMessage>) => (
-      <View
-        ref={toolbarHostRef}
-        style={toolbarLift > 0 ? { marginBottom: toolbarLift } : undefined}
-      >
+      <View collapsable={false}>
+        <AttachmentUploadProgress
+          attachments={pendingAttachments}
+          onRemove={removePendingAttachment}
+        />
         <InputToolbar
           {...props}
           containerStyle={styles.toolbarContainer}
@@ -612,7 +637,7 @@ export function ChatScreen() {
         />
       </View>
     ),
-    [toolbarLift],
+    [pendingAttachments, removePendingAttachment],
   );
 
   const renderComposer = useCallback(
@@ -621,9 +646,9 @@ export function ChatScreen() {
         {...props}
         textInputProps={{
           ...props.textInputProps,
-          placeholder: wsConnected ? "Message" : "Message (offline mode)",
+          placeholder: "Message",
           placeholderTextColor: Colors.textMuted,
-          style: styles.composerInput,
+          style: [styles.composerInput, !wsConnected && styles.composerInputDisabled],
           multiline: true,
           editable: wsConnected,
         }}
@@ -633,25 +658,20 @@ export function ChatScreen() {
   );
 
   const renderActions = useCallback(
-    (props: ActionsProps) => (
-      <Actions
-        {...props}
-        buttonStyle={styles.actionsContainer}
-        icon={() => <Ionicons name="attach" size={22} color={Colors.accent} />}
-        actions={[
-          {
-            title: "Attach",
-            action: () => {
-              if (!wsConnected) {
-                setToastMessage("Cannot attach while disconnected");
-                return;
-              }
-              pickAttachments().catch(() => {});
-            },
-          },
-          { title: "Cancel", action: () => {} },
-        ]}
-      />
+    (_props: ActionsProps) => (
+      <Pressable
+        style={styles.actionsContainer}
+        onPress={() => {
+          if (!wsConnected) {
+            setToastMessage("Cannot attach while disconnected");
+            return;
+          }
+          pickAttachments().catch(() => {});
+        }}
+        hitSlop={8}
+      >
+        <Ionicons name="attach" size={22} color={wsConnected ? Colors.accent : Colors.textMuted} />
+      </Pressable>
     ),
     [pickAttachments, wsConnected],
   );
@@ -688,76 +708,95 @@ export function ChatScreen() {
   }, [replyTarget]);
 
   const handlePressMessage = useCallback((message: OmnisGiftedMessage) => {
-    if (isRetryable(message) && message.omnisOptimisticMessage) {
-      retryOptimisticMessage(message.omnisOptimisticMessage.id).catch(() => {});
-      return;
-    }
-
     if (message.omnisSource === "server" && message.omnisLocalMessage?.attachments?.length) {
       Alert.alert("Attachments", "Use the attachment card controls to download or save media.");
     }
-  }, [retryOptimisticMessage]);
+  }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
-      <View style={styles.header}>
-        <Pressable style={styles.backButton} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={22} color={Colors.textPrimary} />
-        </Pressable>
-
-        <View style={styles.headerTextWrap}>
-          <Text style={styles.headerTitle}>{withUser}</Text>
-          <Text style={[styles.headerSubtitle, wsConnected ? styles.online : styles.offline]}>
-            {wsConnected ? "Connected" : "Reconnecting"}
-          </Text>
+      {selectedMessage ? (
+        <View style={styles.selectionHeader}>
+          <Pressable style={styles.backButton} onPress={() => setSelectedMessage(null)}>
+            <Ionicons name="close" size={22} color={Colors.textPrimary} />
+          </Pressable>
+          <Text style={styles.selectionCount}>1 selected</Text>
+          <View style={styles.selectionActions}>
+            <Pressable style={styles.selectionActionBtn} onPress={handleReplySelected} hitSlop={8}>
+              <Ionicons name="arrow-undo-outline" size={22} color={Colors.textPrimary} />
+            </Pressable>
+            {selectedMessage.omnisLocalMessage?.plaintext ? (
+              <Pressable style={styles.selectionActionBtn} onPress={() => { handleCopySelected().catch(() => {}); }} hitSlop={8}>
+                <Ionicons name="copy-outline" size={22} color={Colors.textPrimary} />
+              </Pressable>
+            ) : null}
+            {selectedMessage.user._id === (auth.userId ?? 0) ? (
+              <Pressable style={styles.selectionActionBtn} onPress={handleDeleteSelected} hitSlop={8}>
+                <Ionicons name="trash-outline" size={22} color={Colors.error} />
+              </Pressable>
+            ) : null}
+          </View>
         </View>
-      </View>
+      ) : (
+        <View style={styles.header}>
+          <Pressable style={styles.backButton} onPress={() => navigation.goBack()}>
+            <Ionicons name="chevron-back" size={22} color={Colors.textPrimary} />
+          </Pressable>
+          <View style={styles.headerTextWrap}>
+            <Text style={styles.headerTitle}>{withUser}</Text>
+            <Text style={[styles.headerSubtitle, wsConnected ? styles.online : styles.offline]}>
+              {wsConnected ? "Connected" : "Reconnecting"}
+            </Text>
+          </View>
+        </View>
+      )}
 
-      <KeyboardAvoidingView
-        style={styles.keyboardAvoid}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={0}
-      >
-      <GiftedChat<OmnisGiftedMessage>
-        messages={giftedMessages}
-        user={{ _id: auth.userId ?? 0, name: auth.username ?? "Me" }}
-        text={composerText}
-        textInputProps={{
-          onChangeText: setComposerText,
-        }}
-        onSend={() => {
-          queueSend().catch((error) => {
-            console.error("[ChatScreen] queue send failed", error);
-          });
-        }}
-        renderBubble={renderBubble}
-        renderInputToolbar={renderInputToolbar}
-        renderComposer={renderComposer}
-        renderActions={renderActions}
-        renderSend={renderSend}
-        renderAccessory={renderAccessory}
-        renderChatFooter={() => (
-          <AttachmentUploadProgress
-            attachments={pendingAttachments}
-            onRemove={removePendingAttachment}
-          />
-        )}
-        onPressMessage={(_context: unknown, message: OmnisGiftedMessage) => handlePressMessage(message)}
-        loadEarlierMessagesProps={{
-          isAvailable: messages.length >= 50,
-          isLoading: isLoadingMessages,
-          onPress: loadEarlier,
-          isInfiniteScrollEnabled: false,
-        }}
-        isSendButtonAlwaysVisible
-        messagesContainerStyle={styles.messagesContainer}
-        listProps={{
-          style: styles.messagesList,
-          contentContainerStyle: styles.messagesContent,
-        }}
-        isUsernameVisible={false}
-      />
-
+      <KeyboardAvoidingView style={styles.keyboardAvoid} behavior="padding">
+        <GiftedChat<OmnisGiftedMessage>
+          messages={giftedMessages}
+          user={{ _id: auth.userId ?? 0, name: auth.username ?? "Me" }}
+          text={composerText}
+          textInputProps={{
+            onChangeText: setComposerText,
+          }}
+          onSend={() => {
+            queueSend().catch((error) => {
+              console.error("[ChatScreen] queue send failed", error);
+            });
+          }}
+          renderBubble={renderBubble}
+          renderInputToolbar={renderInputToolbar}
+          renderComposer={renderComposer}
+          renderActions={renderActions}
+          renderSend={renderSend}
+          renderAccessory={renderAccessory}
+          onPressMessage={(_context: unknown, message: OmnisGiftedMessage) => {
+            if (selectedMessage) { setSelectedMessage(null); return; }
+            handlePressMessage(message);
+          }}
+          onLongPress={(_context: unknown, message: OmnisGiftedMessage) => {
+            if (message.omnisSource === "server" && message.omnisLocalMessage && !message.omnisLocalMessage.is_deleted) {
+              setSelectedMessage(message);
+            }
+          }}
+          loadEarlierMessagesProps={{
+            isAvailable: messages.length >= 50,
+            isLoading: isLoadingMessages,
+            onPress: loadEarlier,
+            isInfiniteScrollEnabled: false,
+          }}
+          isSendButtonAlwaysVisible
+          isKeyboardInternallyHandled={false}
+          maxComposerHeight={120}
+          messageContainerRef={messageContainerRef}
+          messagesContainerStyle={styles.messagesContainer}
+          listProps={{
+            style: styles.messagesList,
+            contentContainerStyle: styles.messagesContent,
+            keyboardDismissMode: "on-drag",
+          }}
+          isUsernameVisible={false}
+        />
       </KeyboardAvoidingView>
 
       <Toast
@@ -866,9 +905,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   toolbarContainer: {
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-    backgroundColor: Colors.background,
+    backgroundColor: "transparent",
     paddingVertical: 6,
     paddingHorizontal: 4,
   },
@@ -876,6 +913,11 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
   },
   actionsContainer: {
+    width: 36,
+    height: 36,
+    justifyContent: "center",
+    alignItems: "center",
+    alignSelf: "flex-end",
     marginLeft: 2,
     marginBottom: 4,
     marginRight: 4,
@@ -908,5 +950,68 @@ const styles = StyleSheet.create({
   },
   sendButtonDisabled: {
     opacity: 0.45,
+  },
+  composerInputDisabled: {
+    opacity: 0.45,
+  },
+  // Selection header (replaces normal header on long-press)
+  selectionHeader: {
+    height: 56,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 8,
+    backgroundColor: Colors.surface,
+  },
+  selectionCount: {
+    flex: 1,
+    color: Colors.textPrimary,
+    fontSize: 17,
+    fontWeight: "600",
+    marginLeft: 8,
+  },
+  selectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  selectionActionBtn: {
+    width: 40,
+    height: 40,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 20,
+  },
+  // Selected bubble highlight
+  bubbleSelected: {
+    backgroundColor: "rgba(150, 172, 183, 0.12)",
+    borderRadius: 12,
+    marginHorizontal: -4,
+    paddingHorizontal: 4,
+  },
+  // Deleted message placeholder
+  deletedBubble: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    maxWidth: "75%",
+    marginHorizontal: 8,
+  },
+  deletedBubbleLeft: {
+    alignSelf: "flex-start",
+    backgroundColor: Colors.messageReceived,
+  },
+  deletedBubbleRight: {
+    alignSelf: "flex-end",
+    backgroundColor: Colors.messageSent,
+  },
+  deletedText: {
+    color: Colors.textMuted,
+    fontSize: 14,
+    fontStyle: "italic",
   },
 });

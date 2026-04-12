@@ -107,7 +107,16 @@ async function _openAndMigrate(): Promise<void> {
       `ALTER TABLE messages ADD COLUMN attachments_json TEXT`,
     );
   } catch {
-    // Column already exists â€” ignore
+    // Column already exists — ignore
+  }
+
+  // Migrate: add is_deleted column for soft-deleted messages
+  try {
+    await db.runAsync(
+      `ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0`,
+    );
+  } catch {
+    // Column already exists — ignore
   }
 }
 
@@ -255,6 +264,7 @@ export async function getMessage(messageId: number): Promise<LocalMessage | null
   return {
     ...row,
     synced: !!row.synced,
+    is_deleted: !!row.is_deleted,
     attachments: row.attachments_json ? JSON.parse(row.attachments_json) : undefined,
   };
 }
@@ -283,6 +293,7 @@ export async function getMessages(
   return rows.reverse().map((row: any) => ({
     ...row,
     synced: !!row.synced,
+    is_deleted: !!row.is_deleted,
     attachments: row.attachments_json ? JSON.parse(row.attachments_json) : undefined,
   }));
 }
@@ -313,6 +324,17 @@ export async function updateMessagePlaintext(
     plaintext,
     messageId,
   ]);
+}
+
+/**
+ * Soft-delete a message locally (mirrors server soft-delete)
+ */
+export async function markMessageDeleted(messageId: number): Promise<void> {
+  const database = await ensureDb();
+  await database.runAsync(
+    `UPDATE messages SET is_deleted = 1, ciphertext = '', nonce = '', plaintext = NULL WHERE id = ?`,
+    [messageId],
+  );
 }
 
 /**

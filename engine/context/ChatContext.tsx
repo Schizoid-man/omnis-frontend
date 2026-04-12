@@ -18,6 +18,7 @@ import {
 import {
     createChat as apiCreateChat,
     createEpoch as apiCreateEpoch,
+    deleteMessage as apiDeleteMessage,
     fetchChat as apiFetchChat,
     fetchEpochKey as apiFetchEpochKey,
     sendMessage as apiSendMessage,
@@ -34,6 +35,7 @@ import {
 import { mediaManager } from "../services/mediaManager";
 import {
     clearUnreadCount,
+    markMessageDeleted,
     searchChats as dbSearchChats,
     getChat,
     getChats,
@@ -51,7 +53,7 @@ import {
 } from "../services/database";
 import { chatSocket } from "../services/websocket";
 import { isTransientNetworkError, retryWithBackoff } from "../services/retry";
-import type { LocalChat, LocalMessage, Message, PendingAttachment, WsServerFrame } from "../types";
+import type { LocalChat, LocalMessage, Message, PendingAttachment, WsMessageDeletedFrame, WsServerFrame } from "../types";
 import { useApp } from "./AppContext";
 
 // State types
@@ -74,7 +76,8 @@ type ChatAction =
   | { type: "SET_LOADING_MESSAGES"; payload: boolean }
   | { type: "SET_SENDING"; payload: boolean }
   | { type: "UPDATE_CHAT"; payload: Partial<LocalChat> & { chat_id: number } }
-  | { type: "SET_WS_CONNECTED"; payload: boolean };
+  | { type: "SET_WS_CONNECTED"; payload: boolean }
+  | { type: "MARK_MESSAGE_DELETED"; payload: number };
 
 // Initial state
 const initialState: ChatState = {
@@ -124,6 +127,15 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
     case "SET_WS_CONNECTED":
       return { ...state, wsConnected: action.payload };
+    case "MARK_MESSAGE_DELETED":
+      return {
+        ...state,
+        messages: state.messages.map((m) =>
+          m.id === action.payload
+            ? { ...m, is_deleted: true, ciphertext: "", nonce: "", plaintext: undefined }
+            : m,
+        ),
+      };
     default:
       return state;
   }
@@ -138,6 +150,7 @@ interface ChatContextValue extends ChatState {
   closeChat: () => void;
   loadMessages: (chatId: number, beforeId?: number) => Promise<void>;
   sendMessage: (text: string, replyId?: number | null, pendingAttachments?: PendingAttachment[]) => Promise<void>;
+  deleteMessage: (chatId: number, messageId: number) => Promise<void>;
   syncChats: () => Promise<void>;
   getEpochKeyForChat: (epochId: number, chatId: number) => Promise<string | null>;
 }
@@ -424,6 +437,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             last_message_time: localMsg.created_at,
           },
         });
+      } else if (frame.type === "message_deleted") {
+        dispatch({ type: "MARK_MESSAGE_DELETED", payload: (frame as WsMessageDeletedFrame).message_id });
+        await markMessageDeleted((frame as WsMessageDeletedFrame).message_id);
       }
       // pong frames are ignored
     },
@@ -801,6 +817,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }
   }, [auth.isAuthenticated]);
 
+  const deleteMessage = useCallback(
+    async (chatId: number, messageId: number) => {
+      // Optimistic local update so the UI responds immediately
+      dispatch({ type: "MARK_MESSAGE_DELETED", payload: messageId });
+      await markMessageDeleted(messageId);
+      await apiDeleteMessage(chatId, messageId);
+    },
+    [],
+  );
+
   const value: ChatContextValue = {
     ...state,
     loadChats,
@@ -810,6 +836,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     closeChat,
     loadMessages,
     sendMessage,
+    deleteMessage,
     syncChats,
     getEpochKeyForChat: getEpochKey,
   };

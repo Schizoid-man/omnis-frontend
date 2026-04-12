@@ -197,6 +197,7 @@ export interface LocalMessage {
   plaintext?: string; // Decrypted content
   created_at: string;
   synced: boolean;
+  is_deleted?: boolean;
   attachments?: MessageAttachment[];
   /** Parsed media metadata from decrypted ciphertext */
   mediaMeta?: MessageMediaMeta;
@@ -251,4 +252,9 @@ export interface WsPongFrame {
   type: "pong";
 }
 
-export type WsServerFrame = WsHistoryFrame | WsNewMessageFrame | WsPongFrame;
+export interface WsMessageDeletedFrame {
+  type: "message_deleted";
+  message_id: number;
+}
+
+export type WsServerFrame = WsHistoryFrame | WsNewMessageFrame | WsPongFrame | WsMessageDeletedFrame;

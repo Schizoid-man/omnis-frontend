@@ -75,23 +75,14 @@ class ChatWebSocket {
         "{chat_id}",
         this.chatId.toString(),
       );
-      const url = `${wsBase}${path}`;
+      const url = `${wsBase}${path}?token=${encodeURIComponent(token)}&device_id=${encodeURIComponent(deviceId)}`;
 
       console.log("[WS] Connecting to", path);
 
-      // Open a plain WebSocket — no credentials in URL or subprotocols
       const ws = new WebSocket(url);
 
       ws.onopen = () => {
-        console.log("[WS] Connected, sending auth frame", { chatId: this.chatId });
-        // Authenticate via the first message (within 10 s server deadline)
-        ws.send(
-          JSON.stringify({
-            type: "auth",
-            token,
-            device_id: deviceId,
-          }),
-        );
+        console.log("[WS] Connected", { chatId: this.chatId });
         this.reconnectAttempt = 0;
         this.onStatus?.("connected");
         this._startPing();
