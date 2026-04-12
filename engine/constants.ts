@@ -3,7 +3,7 @@
  */
 
 export const APP_NAME = "Omnis";
-export const APP_VERSION = "0.9.0-alpha";
+export const APP_VERSION = "0.10.0-alpha";
 
 // API Configuration
 export const DEFAULT_API_BASE_URL = "http://localhost:8000";
